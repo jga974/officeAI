@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.completion import Completer, Completion
@@ -37,6 +38,7 @@ from officeai.inspectors.word_inspector import WordInspector
 from officeai.inspectors.xml_inspector import XmlInspector
 from officeai.core.providers.factory import ProviderFactory
 from officeai.converters.pdf_converter import PdfConverter, PdfConversionError
+from officeai.mailing import MailingEngine, MailingError
 
 app = typer.Typer(
     name="officeai",
@@ -242,6 +244,59 @@ def pdf(
             table.add_row(src.name, "-", f"[bold red]{exc}[/bold red]")
     console.print(table)
     if failures:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def mailing(
+    template: Path = typer.Argument(..., help="Modele Word (.docx) contenant des variables {{ variable }}"),
+    data: Path = typer.Argument(..., help="Fichier de donnees : .xlsx, .xls, .ods ou .csv (une ligne = un document)"),
+    output_dir: Optional[Path] = typer.Option(None, "--output-dir", "-o", help="Dossier de sortie (defaut : mailing_<modele>)"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Motif du nom de fichier, ex: 'lettre_{nom}_{prenom}.docx' ({n} = numero)"),
+    sheet: Optional[str] = typer.Option(None, "--sheet", "-s", help="Feuille a utiliser (tableurs)"),
+    pdf_out: bool = typer.Option(False, "--pdf", help="Produit aussi un PDF par document (LibreOffice requis)."),
+    force: bool = typer.Option(False, "--force", "-f", help="Ecraser les fichiers existants."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Verifie et affiche ce qui serait genere, sans rien creer."),
+):
+    """Publipostage : un document Word personnalise par ligne du fichier de donnees (100% local)."""
+    engine = MailingEngine()
+    try:
+        if dry_run:
+            out_dir, planned = engine.plan(template, data, output_dir, name, sheet)
+            table = Table(title=f"Apercu du publipostage ({len(planned)} document(s)) -> {out_dir.name}/")
+            table.add_column("#", style="magenta")
+            table.add_column("Fichier", style="cyan")
+            table.add_column("Existe deja", style="yellow")
+            for i, (_, dest) in enumerate(planned[:20], start=1):
+                table.add_row(str(i), dest.name, "oui" if dest.exists() else "")
+            console.print(table)
+            if len(planned) > 20:
+                console.print(f"... et {len(planned) - 20} autre(s).")
+            console.print("[bold green]Verification OK. Aucun fichier cree (--dry-run).[/bold green]")
+            return
+
+        with Progress(
+            SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+            BarColumn(), TaskProgressColumn(), TimeElapsedColumn(), console=console,
+        ) as progress:
+            task = progress.add_task("[cyan]Generation des documents...", total=None)
+
+            def on_progress(done: int, total: int):
+                progress.update(task, total=total, completed=done)
+
+            result = engine.run(template, data, output_dir, name, sheet, overwrite=force, to_pdf=pdf_out, progress=on_progress)
+    except MailingError as exc:
+        console.print(f"[bold red][ERREUR] {exc}[/bold red]")
+        raise typer.Exit(code=1)
+
+    console.print(f"\n[bold green][OK] {len(result.generated)} document(s) genere(s) dans {result.output_dir.name}/[/bold green]")
+    if result.pdfs:
+        console.print(f"[bold green]{len(result.pdfs)} PDF cree(s).[/bold green]")
+    if result.overwritten:
+        console.print(Panel("\n".join(f"- {p.name}" for p in result.overwritten),
+                            title=f"[bold yellow]{len(result.overwritten)} fichier(s) ECRASE(S)[/bold yellow]", border_style="yellow"))
+    if result.errors:
+        console.print(Panel("\n".join(result.errors), title="[bold red]Erreurs[/bold red]", border_style="red"))
         raise typer.Exit(code=1)
 
 

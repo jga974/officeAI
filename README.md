@@ -117,12 +117,24 @@ officeai pdf rapport.docx --force  # ecrase un PDF existant (sinon refuse)
 Conversion 100% locale via **LibreOffice** (a installer ; sinon definir `OFFICEAI_SOFFICE` avec le chemin de `soffice`).
 Le PDF est cree a cote du source, dans le repertoire de travail. En mode chat : `/pdf rapport.docx`.
 
-### 6. Traitement de masse (Batch)
+### 6. Publipostage (mailing) : un Word par ligne de donnees
+1. Dans votre modele Word, ecrivez des variables entre doubles accolades : `Bonjour {{ prenom }} {{ nom }}, rendez-vous le {{ date_rdv }}.`
+2. Preparez un fichier de donnees (`.xlsx`, `.xls`, `.ods` ou `.csv`) : **1re ligne = noms de colonnes**, une ligne = un document.
+   Le nom de variable est le nom de colonne simplifie : `Date RDV` -> `{{ date_rdv }}`, `Prénom` -> `{{ prenom }}`.
+```powershell
+officeai mailing lettre.docx contacts.xlsx --dry-run                      # verifie sans rien creer
+officeai mailing lettre.docx contacts.xlsx -n "invitation_{nom}.docx"     # genere dans mailing_lettre/
+officeai mailing lettre.docx contacts.xlsx -n "invitation_{nom}.docx" --pdf   # + un PDF par document
+```
+Options : `-o dossier`, `-s feuille`, `--force` (ecraser). Sans `--force`, rien n'est genere si un fichier existe deja.
+100 % local, sans IA : aucune donnee ne quitte la machine. Les erreurs (variable absente des donnees...) sont detectees **avant** toute ecriture.
+
+### 7. Traitement de masse (Batch)
 ```powershell
 officeai batch --pattern "f*.xls" --prompt "analyse les ventes de {file} et génère rapport_{stem}.docx avec la charte de modele.docx" --yes
 ```
 
-### 7. Mode interactif conversationnel (Chat)
+### 8. Mode interactif conversationnel (Chat)
 ```powershell
 officeai chat
 ```
