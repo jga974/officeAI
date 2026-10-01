@@ -108,12 +108,21 @@ officeai run "qui a fait le plus de ventes dans f1.xls ?"
 officeai run "analyse les ventes dans f1.xls et génère rapport_ventes.docx en respectant la charte de modele.docx"
 ```
 
-### 5. Traitement de masse (Batch)
+### 5. Convertir un Word ou un ODT en PDF
+```powershell
+officeai pdf rapport.docx          # un fichier
+officeai pdf "*.docx" notes.odt    # plusieurs fichiers / motifs
+officeai pdf rapport.docx --force  # ecrase un PDF existant (sinon refuse)
+```
+Conversion 100% locale via **LibreOffice** (a installer ; sinon definir `OFFICEAI_SOFFICE` avec le chemin de `soffice`).
+Le PDF est cree a cote du source, dans le repertoire de travail. En mode chat : `/pdf rapport.docx`.
+
+### 6. Traitement de masse (Batch)
 ```powershell
 officeai batch --pattern "f*.xls" --prompt "analyse les ventes de {file} et génère rapport_{stem}.docx avec la charte de modele.docx" --yes
 ```
 
-### 6. Mode interactif conversationnel (Chat)
+### 7. Mode interactif conversationnel (Chat)
 ```powershell
 officeai chat
 ```
