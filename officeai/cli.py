@@ -34,6 +34,7 @@ from officeai.batch.batch_processor import BatchProcessor
 from officeai.inspectors.excel_inspector import ExcelInspector
 from officeai.inspectors.word_inspector import WordInspector
 from officeai.core.providers.factory import ProviderFactory
+from officeai.converters.pdf_converter import PdfConverter, PdfConversionError
 
 app = typer.Typer(
     name="officeai",
@@ -182,6 +183,48 @@ def inspect(
         console.print(table)
     else:
         console.print(f"[yellow]Type de fichier non supporte pour l'inspection : {ext}[/yellow]")
+
+
+def expand_file_args(files: list[str]) -> list[Path]:
+    """Developpe les motifs (*.docx) que le shell Windows ne developpe pas."""
+    paths: list[Path] = []
+    for f in files:
+        if any(c in f for c in "*?["):
+            paths.extend(sorted(Path.cwd().glob(f)))
+        else:
+            paths.append(Path(f))
+    return paths
+
+
+@app.command()
+def pdf(
+    files: list[str] = typer.Argument(..., help="Fichier(s) Word (.docx/.doc) ou OpenDocument (.odt) a convertir (motifs acceptes : *.docx)"),
+    force: bool = typer.Option(False, "--force", "-f", help="Ecraser un PDF existant du meme nom."),
+):
+    """Convertit des documents Word ou ODT en PDF (traitement 100% local via LibreOffice)."""
+    targets = expand_file_args(files)
+    if not targets:
+        console.print("[yellow]Aucun fichier ne correspond.[/yellow]")
+        raise typer.Exit(code=1)
+
+    table = Table(title="Conversion PDF")
+    table.add_column("Source", style="cyan")
+    table.add_column("PDF", style="green")
+    table.add_column("Statut")
+    failures = 0
+    for src in targets:
+        existed = src.with_suffix(".pdf").exists()
+        try:
+            with console.status(f"[bold blue]Conversion de {src.name}...[/bold blue]"):
+                out = PdfConverter.convert(src, overwrite=force)
+            table.add_row(src.name, f"{out.name} ({out.stat().st_size / 1024:.1f} Ko)",
+                          "[bold yellow]ecrase[/bold yellow]" if existed else "[bold green]OK[/bold green]")
+        except PdfConversionError as exc:
+            failures += 1
+            table.add_row(src.name, "-", f"[bold red]{exc}[/bold red]")
+    console.print(table)
+    if failures:
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -342,6 +385,7 @@ def chat(
         "• [bold green]Touche [TAB][/bold green] : Appuyez sur [TAB] pour autocompléter le nom de n'importe quel fichier !\n"
         "• Tapez [bold cyan]/files[/bold cyan] ou [bold cyan]/ls[/bold cyan] pour réafficher la liste des fichiers.\n"
         "• Tapez [bold cyan]/inspect <fichier>[/bold cyan] pour examiner un fichier immédiatement.\n"
+        "• Tapez [bold cyan]/pdf <fichier>[/bold cyan] pour convertir un Word/ODT en PDF.\n"
         "• Tapez [bold yellow]exit[/bold yellow] ou [bold yellow]quit[/bold yellow] pour quitter.",
         title="OfficeAI Chat"
     ))
@@ -363,6 +407,16 @@ def chat(
                 break
             elif cmd_lower in ("/files", "/ls"):
                 print_detected_files()
+                continue
+            elif cmd_lower.startswith("/pdf"):
+                parts = user_input.split(maxsplit=1)
+                if len(parts) > 1:
+                    try:
+                        pdf(files=[parts[1].strip()], force=False)
+                    except typer.Exit:
+                        pass
+                else:
+                    console.print("[yellow]Usage : /pdf <fichier.docx|fichier.odt>[/yellow]")
                 continue
             elif cmd_lower.startswith("/inspect"):
                 parts = user_input.split(maxsplit=1)
