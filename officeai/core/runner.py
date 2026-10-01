@@ -1,14 +1,22 @@
 """
 Exécuteur de scripts Python d'automatisation bureautique avec capture d'erreurs.
+
+Le script est confiné au répertoire de travail (analyse statique + audit hook)
+et tout changement du disque (créations, modifications, suppressions) est
+constaté par comparaison d'instantanés, indépendamment de ce que déclare le code.
 """
 
 from __future__ import annotations
 import os
 import sys
 import subprocess
-import tempfile
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from officeai.core.sandbox import analyze_code
+
+CACHE_DIRNAME = ".officeai_cache"
+LAUNCHER = Path(__file__).with_name("_guard_launcher.py")
 
 
 @dataclass
@@ -19,34 +27,73 @@ class ExecutionResult:
     return_code: int
     script_path: Path
     created_files: list[Path]
+    deleted_files: list[Path] = field(default_factory=list)
+    modified_files: list[Path] = field(default_factory=list)
+
+
+def _snapshot(root: Path) -> dict[Path, tuple[int, int]]:
+    """Instantané récursif {chemin: (taille, mtime_ns)} du dossier, hors dossier technique."""
+    snap: dict[Path, tuple[int, int]] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != CACHE_DIRNAME]
+        for name in dirnames:
+            snap[Path(dirpath) / name] = (-1, 0)
+        for name in filenames:
+            p = Path(dirpath) / name
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            snap[p] = (st.st_size, st.st_mtime_ns)
+    return snap
 
 
 class ScriptRunner:
-    """Exécute de manière isolée un script Python généré par l'agent."""
+    """Exécute de manière confinée un script Python généré par l'agent."""
 
     @classmethod
-    def run_code(cls, python_code: str, working_dir: Path | None = None) -> ExecutionResult:
-        cwd = working_dir or Path.cwd()
-        cache_dir = cwd / ".officeai_cache"
+    def run_code(
+        cls,
+        python_code: str,
+        working_dir: Path | None = None,
+        allow_delete: bool = False,
+    ) -> ExecutionResult:
+        cwd = (working_dir or Path.cwd()).resolve()
+        cache_dir = cwd / CACHE_DIRNAME
         cache_dir.mkdir(exist_ok=True)
+        tmp_dir = cache_dir / "tmp"
+        tmp_dir.mkdir(exist_ok=True)
 
         script_file = cache_dir / "latest_task.py"
         script_file.write_text(python_code, encoding="utf-8")
 
-        # Snapshot des fichiers avant exécution
-        files_before = set(cwd.glob("*"))
+        analysis = analyze_code(python_code)
+        if not analysis.is_safe:
+            return ExecutionResult(
+                success=False,
+                stdout="",
+                stderr="Code refusé (sécurité) :\n- " + "\n- ".join(analysis.violations),
+                return_code=126,
+                script_path=script_file,
+                created_files=[],
+            )
 
-        # Exécuter avec l'interpréteur Python actuel (.venv)
-        python_exec = sys.executable
+        before = _snapshot(cwd)
 
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
-        # S'assurer que le répertoire de travail est dans PYTHONPATH
+        env["OFFICEAI_ROOT"] = str(cwd)
+        env["OFFICEAI_CACHE"] = str(cache_dir)
+        env["OFFICEAI_ALLOW_DELETE"] = "1" if allow_delete else "0"
+        # Fichiers temporaires et caches des bibliothèques restent dans le dossier de travail
+        for var in ("TMPDIR", "TEMP", "TMP"):
+            env[var] = str(tmp_dir)
+        env["MPLCONFIGDIR"] = str(cache_dir / "mpl")
         existing_pythonpath = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = str(cwd) + (os.pathsep + existing_pythonpath if existing_pythonpath else "")
 
         process = subprocess.run(
-            [python_exec, str(script_file)],
+            [sys.executable, str(LAUNCHER), str(script_file)],
             cwd=str(cwd),
             capture_output=True,
             text=True,
@@ -55,8 +102,10 @@ class ScriptRunner:
             env=env,
         )
 
-        files_after = set(cwd.glob("*"))
-        created_files = [f for f in (files_after - files_before) if f.name != ".officeai_cache"]
+        after = _snapshot(cwd)
+        created = sorted(p for p in after if p not in before)
+        deleted = sorted(p for p in before if p not in after)
+        modified = sorted(p for p in after if p in before and before[p] != after[p])
 
         return ExecutionResult(
             success=(process.returncode == 0),
@@ -64,5 +113,7 @@ class ScriptRunner:
             stderr=process.stderr,
             return_code=process.returncode,
             script_path=script_file,
-            created_files=created_files,
+            created_files=created,
+            deleted_files=deleted,
+            modified_files=modified,
         )

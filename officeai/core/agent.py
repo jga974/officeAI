@@ -4,6 +4,7 @@ Agent d'orchestration Gemini pour l'automatisation bureautique.
 
 from __future__ import annotations
 from pathlib import Path
+from datetime import datetime
 from typing import Any, Callable
 from rich.console import Console
 from rich.panel import Panel
@@ -12,6 +13,7 @@ from officeai.config import Config
 from officeai.core.providers.base import LLMProvider
 from officeai.core.providers.factory import ProviderFactory
 from officeai.core.runner import ScriptRunner, ExecutionResult
+from officeai.core.sandbox import analyze_code
 from officeai.inspectors.excel_inspector import ExcelInspector
 from officeai.inspectors.word_inspector import WordInspector
 
@@ -20,10 +22,14 @@ Ton rôle est de concevoir et générer des scripts Python robustes, autonomes e
 
 RÈGLES D'OR SUR LES RÉPONSES ET LE CODE :
 1. RÉPONSES DIRECTES EN TEXTE (SANS AUCUN CODE PYTHON) :
-   - Salutations, culture, météo, cours de change, conversation (ex: "bonjour", "cours du yen", "quelle date ?", "qui es-tu ?").
+   - Salutations, culture générale, conversation (ex: "bonjour", "cours du yen", "quelle date ?", "qui es-tu ?").
    - Inventaire des fichiers (ex: "liste de mes fichiers ?", "quels fichiers sont présents ?", "montre les fichiers du dossier").
    - Métadonnées et statistiques élémentaires déjà visibles dans le contexte (ex: "nombre de lignes de f1.xls ?", "quelles sont les colonnes de f1.xls ?", "taille du fichier").
    -> Dans tous ces cas, RÉPONDS DIRECTEMENT ET PRÉCISÉMENT EN TEXTE CLAIR (Markdown). Ne génère AUCUN bloc de code Python (aucun ```python).
+
+   - Informations en temps réel (météo, cours de change, actualités) : tu n'as PAS accès à internet. Dis-le honnêtement,
+     n'invente aucune valeur chiffrée actuelle.
+   - Nombre de fichiers : compte-les à partir de l'INVENTAIRE DU RÉPERTOIRE du contexte.
 
 2. CODE PYTHON POUR TRAITEMENT DE DONNÉES OU CRÉATION DE DOCUMENTS :
    - Ne génère un bloc de code Python (dans un unique ```python ... ```) QUE si l'utilisateur demande explicitement :
@@ -32,6 +38,16 @@ RÈGLES D'OR SUR LES RÉPONSES ET LE CODE :
    - Bibliothèques autorisées : pandas, openpyxl, xlrd, odf (engine='odf'), python-docx, docxtpl, matplotlib.pyplot, pathlib, os, sys.
    - Si création de rapport Word avec modèle : utilise `DocxStyler.clone_template_blank(template_path, output_path)` et applique les styles existants.
    - Pense toujours à afficher les résultats dans stdout avec `print()`.
+
+3. SÉCURITÉ (NON NÉGOCIABLE) :
+   - Tu travailles UNIQUEMENT dans le répertoire courant (et ses sous-dossiers). Utilise exclusivement des chemins relatifs.
+     Jamais de chemin absolu, de `..`, de `~`, de lecteur Windows (C:\\) ni de dossier utilisateur.
+   - Interdits : subprocess, os.system, socket/réseau, ctypes, eval/exec, importlib. Ce code sera refusé.
+   - Ne supprime, n'écrase et ne déplace JAMAIS un fichier existant sauf demande explicite de l'utilisateur.
+     Pour produire un résultat, crée un NOUVEAU fichier. Si l'utilisateur demande une suppression, fais-la
+     uniquement pour les fichiers nommés, et affiche chaque fichier supprimé avec `print()`.
+   - Pour les questions sur les fichiers du dossier, base-toi uniquement sur la section « INVENTAIRE DU RÉPERTOIRE »
+     et sur les inspections fournies dans le contexte ; n'invente jamais de fichier.
 """
 
 
@@ -52,13 +68,32 @@ class OfficeAIAgent:
             model_name=model_name,
         )
 
+    @staticmethod
+    def list_directory(cwd: Path) -> str:
+        """Inventaire textuel (fichiers et sous-dossiers de premier niveau) du répertoire de travail."""
+        lines = [
+            "=== INVENTAIRE DU RÉPERTOIRE ===",
+            f"Répertoire de travail : {cwd.name} ({cwd})",
+            f"Date du jour : {datetime.now():%d/%m/%Y %H:%M}",
+        ]
+        entries = [p for p in sorted(cwd.iterdir(), key=lambda p: p.name.lower()) if not p.name.startswith(".")]
+        if not entries:
+            lines.append("(répertoire vide)")
+        for p in entries:
+            if p.is_dir():
+                lines.append(f"- [dossier] {p.name}/")
+            else:
+                st = p.stat()
+                lines.append(f"- {p.name} ({st.st_size / 1024:.1f} Ko, modifié le {datetime.fromtimestamp(st.st_mtime):%d/%m/%Y %H:%M})")
+        return "\n".join(lines)
+
     def scan_and_inspect_directory(self, working_dir: Path | None = None) -> str:
-        """Découvre et inspecte les fichiers bureautiques du dossier courant."""
+        """Inventaire du dossier courant + inspection des fichiers bureautiques."""
         cwd = working_dir or Path.cwd()
-        reports = []
+        reports = [self.list_directory(cwd)]
 
         # Lister les fichiers Excel / CSV
-        for p in cwd.glob("*"):
+        for p in sorted(cwd.glob("*")):
             if p.is_file() and ExcelInspector.can_inspect(p):
                 try:
                     reports.append(ExcelInspector.format_for_prompt(p))
@@ -73,10 +108,28 @@ class OfficeAIAgent:
                 except Exception as e:
                     reports.append(f"Fichier Word détecté {p.name} (erreur inspection: {e})")
 
-        if not reports:
-            return "Aucun fichier bureautique (Excel/Word/CSV) trouvé dans le répertoire courant."
-
         return "\n\n".join(reports)
+
+    def _report_changes(self, result: ExecutionResult, cwd: Path) -> None:
+        """Informe toujours l'utilisateur des fichiers supprimés ou modifiés par le script."""
+        def rel(p: Path) -> str:
+            try:
+                return str(p.relative_to(cwd.resolve()))
+            except ValueError:
+                return str(p)
+
+        if result.deleted_files:
+            self.console.print(Panel(
+                "\n".join(f"- {rel(p)}" for p in result.deleted_files),
+                title=f"[bold red]{len(result.deleted_files)} fichier(s)/dossier(s) SUPPRIME(S)[/bold red]",
+                border_style="red",
+            ))
+        if result.modified_files:
+            self.console.print(Panel(
+                "\n".join(f"- {rel(p)}" for p in result.modified_files),
+                title=f"[bold yellow]{len(result.modified_files)} fichier(s) MODIFIE(S)/ecrase(s)[/bold yellow]",
+                border_style="yellow",
+            ))
 
     def process_request(
         self,
@@ -84,6 +137,7 @@ class OfficeAIAgent:
         working_dir: Path | None = None,
         max_retries: int = 3,
         confirm_callback: Callable[[str, str], bool] | None = None,
+        delete_callback: Callable[[list[str]], bool] | None = None,
     ) -> ExecutionResult:
         """
         Traite une requête utilisateur de bout en bout :
@@ -133,11 +187,29 @@ class OfficeAIAgent:
                     created_files=[],
                 )
 
+        # 3 bis. Suppression de fichiers : confirmation explicite et séparée, refusée par défaut
+        allow_delete = False
+        analysis = analyze_code(python_code)
+        if analysis.deletes_files:
+            self.console.print(Panel(
+                "Ce script contient des opérations de SUPPRESSION :\n- " + "\n- ".join(analysis.deletions),
+                title="[bold red]ATTENTION : suppression de fichiers[/bold red]",
+                border_style="red",
+            ))
+            allow_delete = bool(delete_callback and delete_callback(analysis.deletions))
+            if not allow_delete:
+                self.console.print("[yellow]Suppression non approuvée : exécution annulée. Aucun fichier n'a été touché.[/yellow]")
+                return ExecutionResult(
+                    success=False, stdout="", stderr="Suppression refusée par l'utilisateur",
+                    return_code=-1, script_path=Path("cancelled"), created_files=[],
+                )
+
         # 4. Exécution du script
         current_code = python_code
         for attempt in range(1, max_retries + 1):
             with self.console.status(f"[bold green]Exécution du traitement (tentative {attempt}/{max_retries})...[/bold green]"):
-                result = ScriptRunner.run_code(current_code, working_dir=cwd)
+                result = ScriptRunner.run_code(current_code, working_dir=cwd, allow_delete=allow_delete)
+            self._report_changes(result, cwd)
 
             if result.success:
                 return result

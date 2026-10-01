@@ -68,6 +68,70 @@ class MockProvider(LLMProvider):
                 lines.append(f"- **{f.name}** ({size_kb} Ko)")
             return ("\n".join(lines), "")
 
+        local_files = [f for f in cwd.glob("*") if f.is_file() and not f.name.startswith(".")]
+        named = next((f for f in sorted(local_files) if f.name.lower() in prompt_lower), None)
+
+        # 4 a. Nombre de fichiers du repertoire
+        if any(k in prompt_lower for k in ("nombre de fichier", "combien de fichier")):
+            n_excel = sum(1 for f in local_files if f.suffix.lower() in (".xls", ".xlsx", ".xlsm", ".ods"))
+            return (f"Le repertoire contient **{len(local_files)} fichier(s)** dont {n_excel} tableur(s).", "")
+
+        # 4 b. Creation d'un fichier contenant une liste de fichiers (ex: "liste des fichiers excel")
+        if any(w in prompt_lower for w in ("cree", "creer", "genere", "generer", "ecris", "ecrire")) and \
+                "liste" in prompt_lower and "fichier" in prompt_lower and "rapport" not in prompt_lower:
+            if "word" in prompt_lower:
+                exts, label = (".docx", ".odt"), "Word"
+            elif "excel" in prompt_lower or "exel" in prompt_lower or "tableur" in prompt_lower:
+                exts, label = (".xls", ".xlsx", ".xlsm", ".ods"), "Excel"
+            else:
+                exts, label = None, "tous"
+            m = re.search(r"[\w\-]+\.(?:txt|csv|md)", prompt_lower)
+            out_name = m.group(0) if m else f"liste_fichiers_{label.lower()}.txt"
+            code = (
+                "from pathlib import Path\n"
+                f"exts = {exts!r}\n"
+                "files = sorted(p.name for p in Path('.').iterdir()\n"
+                "               if p.is_file() and not p.name.startswith('.') and (exts is None or p.suffix.lower() in exts))\n"
+                f"out = Path({out_name!r})\n"
+                "if out.exists():\n"
+                "    out = out.with_name(out.stem + '_nouveau' + out.suffix)\n"
+                "out.write_text('\\n'.join(files) + '\\n', encoding='utf-8')\n"
+                "print(f'{len(files)} fichier(s) ecrits dans {out}')\n"
+            )
+            return (f"Creation d'un fichier texte listant les fichiers ({label}) du dossier courant, sans ecraser de fichier existant.", code)
+
+        # 4 bis. Suppression explicite d'un fichier nomme (le script sera soumis a confirmation)
+        if named and any(w in prompt_lower for w in ("supprime", "supprimer", "efface", "effacer", "delete")):
+            code = (
+                "from pathlib import Path\n"
+                f"target = Path({named.name!r})\n"
+                "target.unlink()\n"
+                "print(f'Fichier supprime : {target}')\n"
+            )
+            return (f"Suppression du fichier {named.name} du repertoire de travail.", code)
+
+        # 4 ter. Proprietes d'un fichier nomme : taille, date
+        if named and any(w in prompt_lower for w in ("taille", "poids", "octets", "modifie", "date de")):
+            st = named.stat()
+            from datetime import datetime as _dt
+            return (
+                f"**{named.name}** : {round(st.st_size / 1024, 1)} Ko ({st.st_size} octets), "
+                f"derniere modification le {_dt.fromtimestamp(st.st_mtime):%d/%m/%Y a %H:%M}.",
+                "",
+            )
+
+        # 4 quater. Colonnes / feuilles d'un tableur nomme
+        if named and any(w in prompt_lower for w in ("colonne", "feuille", "en-tete", "entete")):
+            from officeai.inspectors.excel_inspector import ExcelInspector
+            if ExcelInspector.can_inspect(named):
+                data = ExcelInspector.inspect(named)
+                parts = []
+                for sname, sinfo in data["sheets"].items():
+                    cols = ", ".join(c["name"] for c in sinfo["columns"])
+                    parts.append(f"- feuille **{sname}** : {cols}")
+                return (f"Colonnes de **{named.name}** :\n" + "\n".join(parts), "")
+            return (f"**{named.name}** n'est pas un tableur : pas de colonnes a lister.", "")
+
         # 5. Demande de comptage de lignes ou colonnes d'un fichier
         if any(rc in prompt_lower for rc in ("nombre de ligne", "combien de ligne", "nombre de colonnes", "combien de colonnes")):
             # Recherche du fichier mentionné
@@ -101,16 +165,10 @@ class MockProvider(LLMProvider):
         is_file_operation = any(act in prompt_lower for act in ("analyse", "analyser", "traite", "traiter", "calcule", "calculer", "rapport", "document", "fichier", "dossier", "tableau", "tableur", "colonne", "lot", "batch", "ventes"))
 
         if not (mentions_local_file or is_file_operation):
-            if "yen" in prompt_lower:
+            if "yen" in prompt_lower or any(w in prompt_lower for w in ("temperature", "meteo", "temps")):
                 return (
-                    "Le cours indicatif actuel du Yen japonais (JPY) se situe autour de 1 EUR ≈ 163 JPY "
-                    "(environ 0,0061 EUR pour 1 JPY, sujet aux fluctuations du marche des changes).",
-                    "",
-                )
-            elif any(w in prompt_lower for w in ("temperature", "meteo", "temps")):
-                return (
-                    "La temperature depend de votre localisation precise. Actuellement sur la France, "
-                    "les temperatures moyennes de saison se situent entre 15°C et 20°C selon les regions.",
+                    "Je n'ai pas acces a internet : je ne peux pas vous donner d'information en temps reel "
+                    "(meteo, cours de change). Consultez une source en ligne pour une valeur a jour.",
                     "",
                 )
             else:
@@ -160,6 +218,14 @@ top_score = totals.max()
 print(f"Le meilleur resultat a ete realise par {{top_name}} avec {{top_score}} ventes.")
 """
             return explanation, code
+
+        if not any(w in prompt_lower for w in ("rapport", "genere", "generer", "analyse", "analyser", "traite", "traiter", "word", "docx", "cree", "creer", "synthese")):
+            return (
+                "Je n'ai pas bien compris votre demande. Exemples : 'liste de mes fichiers', "
+                "'colonnes de f1.xls', 'taille de modele.docx', 'qui a fait le plus de ventes dans f1.xls ?', "
+                "'analyse f1.xls et genere rapport_ventes.docx'.",
+                "",
+            )
 
         # 8. Demande explicite de création de rapport Word (Scénario de génération documentaire)
         explanation = (

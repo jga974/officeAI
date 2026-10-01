@@ -5,6 +5,7 @@ Moteur de traitement par lot (Batch) pour OfficeAI avec suivi de progression Ric
 from __future__ import annotations
 from pathlib import Path
 from typing import Callable
+import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
 
@@ -25,6 +26,7 @@ class BatchProcessor:
         prompt_template: str,
         working_dir: Path | None = None,
         auto_confirm: bool = True,
+        delete_callback: Callable[[list[str]], bool] | None = None,
     ) -> list[tuple[Path, ExecutionResult]]:
         """
         Trouve tous les fichiers correspondant au pattern (ex: '*.xls') et applique
@@ -68,12 +70,20 @@ class BatchProcessor:
                 confirm_cb = None
                 if not auto_confirm:
                     def confirm_cb(exp: str, code: str) -> bool:
-                        return True
+                        progress.stop()
+                        try:
+                            self.console.print(f"\n[bold cyan]{current_file.name}[/bold cyan] : {exp}")
+                            return typer.confirm("Executer ce script ?", default=True)
+                        except typer.Abort:
+                            return False
+                        finally:
+                            progress.start()
 
                 res = self.agent.process_request(
                     user_prompt=file_prompt,
                     working_dir=cwd,
                     confirm_callback=confirm_cb,
+                    delete_callback=delete_callback,
                 )
 
                 results.append((current_file, res))
