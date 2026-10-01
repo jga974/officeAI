@@ -100,6 +100,32 @@ class MockProvider(LLMProvider):
             )
             return (f"Creation d'un fichier texte listant les fichiers ({label}) du dossier courant, sans ecraser de fichier existant.", code)
 
+        # 4 c. Comptage par categorie dans un fichier XML nomme
+        if named and named.suffix.lower() == ".xml" and any(
+                w in prompt_lower for w in ("nombre", "combien", "compte", "calcul", "par type", "par ")):
+            from officeai.inspectors.xml_inspector import XmlInspector
+            try:
+                info = XmlInspector.inspect(named)
+            except Exception as exc:
+                return (f"Impossible de lire {named.name} : {exc}", "")
+            rec = info["record_tag"]
+            attrs = list(info["elements"][rec]["attributes"]) if rec else []
+            words = set(re.findall(r"\w+", prompt_lower))
+            key = next((a for a in attrs if a.lower() in words), attrs[0] if attrs else None)
+            if not rec or not key:
+                return (f"Je n'ai pas trouve d'element repete avec attribut dans {named.name}.", "")
+            code = (
+                "import xml.etree.ElementTree as ET\n"
+                "from collections import Counter\n"
+                f"root = ET.parse({named.name!r}).getroot()\n"
+                f"counts = Counter(el.get({key!r}, '(vide)') for el in root.iter({rec!r}))\n"
+                f"print('Nombre de <{rec}> par {key} :')\n"
+                "for k, n in counts.most_common():\n"
+                "    print(f'- {k} : {n}')\n"
+                "print(f'Total : {sum(counts.values())}')\n"
+            )
+            return (f"Lecture de {named.name} et comptage des <{rec}> par attribut '{key}'.", code)
+
         # 4 bis. Suppression explicite d'un fichier nomme (le script sera soumis a confirmation)
         if named and any(w in prompt_lower for w in ("supprime", "supprimer", "efface", "effacer", "delete")):
             code = (

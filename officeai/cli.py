@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 from typing import Optional
 import typer
+import xml.etree.ElementTree as ET
 from rich.console import Console
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -33,6 +34,7 @@ from officeai.core.agent import OfficeAIAgent
 from officeai.batch.batch_processor import BatchProcessor
 from officeai.inspectors.excel_inspector import ExcelInspector
 from officeai.inspectors.word_inspector import WordInspector
+from officeai.inspectors.xml_inspector import XmlInspector
 from officeai.core.providers.factory import ProviderFactory
 from officeai.converters.pdf_converter import PdfConverter, PdfConversionError
 
@@ -180,6 +182,22 @@ def inspect(
         table.add_column("Style", style="cyan")
         for s in data["paragraph_styles"][:12]:
             table.add_row(s)
+        console.print(table)
+    elif XmlInspector.can_inspect(file_path):
+        try:
+            data = XmlInspector.inspect(file_path)
+        except (ValueError, ET.ParseError) as exc:
+            console.print(f"[bold red]XML illisible : {exc}[/bold red]")
+            raise typer.Exit(code=1)
+        console.print(f"\n[bold cyan]Fichier XML :[/bold cyan] {data['file_name']} ({data['size_kb']} Ko)")
+        console.print(f"Racine : <{data['root_tag']}>  Enregistrement : <{data['record_tag']}>")
+        table = Table(title="Elements")
+        table.add_column("Element", style="cyan")
+        table.add_column("Nombre", style="magenta")
+        table.add_column("Attributs / sous-elements", style="green")
+        for tag, info in data["elements"].items():
+            extra = [f"@{k}" for k in info["attributes"]] + info["children"]
+            table.add_row(tag, str(info["count"]), ", ".join(extra))
         console.print(table)
     else:
         console.print(f"[yellow]Type de fichier non supporte pour l'inspection : {ext}[/yellow]")

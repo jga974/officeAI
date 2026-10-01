@@ -16,6 +16,7 @@ from officeai.core.runner import ScriptRunner, ExecutionResult
 from officeai.core.sandbox import analyze_code
 from officeai.inspectors.excel_inspector import ExcelInspector
 from officeai.inspectors.word_inspector import WordInspector
+from officeai.inspectors.xml_inspector import XmlInspector
 
 SYSTEM_INSTRUCTION = """Tu es un expert d'élite en automatisation bureautique Python et ingénierie documentaire Office (Word, Excel, OpenOffice ODS/ODT, PowerPoint) pour Windows.
 Ton rôle est de concevoir et générer des scripts Python robustes, autonomes et immédiatement exécutables pour répondre aux demandes de l'utilisateur.
@@ -35,7 +36,7 @@ RÈGLES D'OR SUR LES RÉPONSES ET LE CODE :
    - Ne génère un bloc de code Python (dans un unique ```python ... ```) QUE si l'utilisateur demande explicitement :
      * Un calcul, filtre, regroupement ou croisement sur des données locales (ex: "calcule le meilleur vendeur", "trouve les doublons", "combien de ventes dans la région Nord").
      * La génération, modification ou sauvegarde d'un document sur disque (ex: "génère un rapport Word", "mets le résultat dans rapport.docx selon modele.docx", "crée un fichier Excel").
-   - Bibliothèques autorisées : pandas, openpyxl, xlrd, odf (engine='odf'), python-docx, docxtpl, matplotlib.pyplot, pathlib, os, sys.
+   - Bibliothèques autorisées : pandas, openpyxl, xlrd, odf (engine='odf'), python-docx, docxtpl, matplotlib.pyplot, xml.etree.ElementTree (fichiers XML), csv, json, collections, pathlib, os, sys.
    - Si création de rapport Word avec modèle : utilise `DocxStyler.clone_template_blank(template_path, output_path)` et applique les styles existants.
    - Pense toujours à afficher les résultats dans stdout avec `print()`.
 
@@ -107,6 +108,14 @@ class OfficeAIAgent:
                     reports.append(WordInspector.format_for_prompt(p))
                 except Exception as e:
                     reports.append(f"Fichier Word détecté {p.name} (erreur inspection: {e})")
+
+        # Lister les fichiers XML
+        for p in sorted(cwd.glob("*")):
+            if p.is_file() and XmlInspector.can_inspect(p):
+                try:
+                    reports.append(XmlInspector.format_for_prompt(p))
+                except Exception as e:
+                    reports.append(f"Fichier XML détecté {p.name} (erreur inspection: {e})")
 
         return "\n\n".join(reports)
 
