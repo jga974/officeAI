@@ -68,6 +68,41 @@ class MockProvider(LLMProvider):
                 lines.append(f"- **{f.name}** ({size_kb} Ko)")
             return ("\n".join(lines), "")
 
+        local_files = [f for f in cwd.glob("*") if f.is_file() and not f.name.startswith(".")]
+        named = next((f for f in sorted(local_files) if f.name.lower() in prompt_lower), None)
+
+        # 4 bis. Suppression explicite d'un fichier nomme (le script sera soumis a confirmation)
+        if named and any(w in prompt_lower for w in ("supprime", "supprimer", "efface", "effacer", "delete")):
+            code = (
+                "from pathlib import Path\n"
+                f"target = Path({named.name!r})\n"
+                "target.unlink()\n"
+                "print(f'Fichier supprime : {target}')\n"
+            )
+            return (f"Suppression du fichier {named.name} du repertoire de travail.", code)
+
+        # 4 ter. Proprietes d'un fichier nomme : taille, date
+        if named and any(w in prompt_lower for w in ("taille", "poids", "octets", "modifie", "date de")):
+            st = named.stat()
+            from datetime import datetime as _dt
+            return (
+                f"**{named.name}** : {round(st.st_size / 1024, 1)} Ko ({st.st_size} octets), "
+                f"derniere modification le {_dt.fromtimestamp(st.st_mtime):%d/%m/%Y a %H:%M}.",
+                "",
+            )
+
+        # 4 quater. Colonnes / feuilles d'un tableur nomme
+        if named and any(w in prompt_lower for w in ("colonne", "feuille", "en-tete", "entete")):
+            from officeai.inspectors.excel_inspector import ExcelInspector
+            if ExcelInspector.can_inspect(named):
+                data = ExcelInspector.inspect(named)
+                parts = []
+                for sname, sinfo in data["sheets"].items():
+                    cols = ", ".join(c["name"] for c in sinfo["columns"])
+                    parts.append(f"- feuille **{sname}** : {cols}")
+                return (f"Colonnes de **{named.name}** :\n" + "\n".join(parts), "")
+            return (f"**{named.name}** n'est pas un tableur : pas de colonnes a lister.", "")
+
         # 5. Demande de comptage de lignes ou colonnes d'un fichier
         if any(rc in prompt_lower for rc in ("nombre de ligne", "combien de ligne", "nombre de colonnes", "combien de colonnes")):
             # Recherche du fichier mentionné
@@ -160,6 +195,14 @@ top_score = totals.max()
 print(f"Le meilleur resultat a ete realise par {{top_name}} avec {{top_score}} ventes.")
 """
             return explanation, code
+
+        if not any(w in prompt_lower for w in ("rapport", "genere", "generer", "analyse", "analyser", "traite", "traiter", "word", "docx", "cree", "creer", "synthese")):
+            return (
+                "Je n'ai pas bien compris votre demande. Exemples : 'liste de mes fichiers', "
+                "'colonnes de f1.xls', 'taille de modele.docx', 'qui a fait le plus de ventes dans f1.xls ?', "
+                "'analyse f1.xls et genere rapport_ventes.docx'.",
+                "",
+            )
 
         # 8. Demande explicite de création de rapport Word (Scénario de génération documentaire)
         explanation = (

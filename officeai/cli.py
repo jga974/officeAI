@@ -43,6 +43,24 @@ app = typer.Typer(
 console = Console(legacy_windows=False)
 
 
+def confirm_deletion(deletions: list[str]) -> bool:
+    """Confirmation explicite des suppressions (jamais automatique, meme avec --yes)."""
+    try:
+        return typer.confirm("[ATTENTION] Autoriser la SUPPRESSION de fichiers par ce script ?", default=False)
+    except typer.Abort:
+        return False
+
+
+def make_confirm_cb(auto: bool = False):
+    def confirm_cb(explanation: str, code: str) -> bool:
+        console.print(Panel(explanation, title="[bold cyan]Demarche Proposee par l'IA[/bold cyan]"))
+        console.print(Panel(Syntax(code, "python", theme="monokai", line_numbers=True), title="[bold green]Script Python a Executer[/bold green]"))
+        if auto:
+            return True
+        return typer.confirm("Souhaitez-vous executer ce script sur vos fichiers ?", default=True)
+    return confirm_cb
+
+
 def version_callback(value: bool):
     if value:
         console.print(f"[bold cyan]OfficeAI[/bold cyan] version [bold green]{__version__}[/bold green]")
@@ -79,17 +97,10 @@ def run(
 
     agent = OfficeAIAgent(provider_name=chosen_provider, model_name=model, console=console)
 
-    def confirm_cb(explanation: str, code: str) -> bool:
-        console.print(Panel(explanation, title="[bold cyan]Demarche Proposee par l'IA[/bold cyan]"))
-        console.print(Panel(Syntax(code, "python", theme="monokai", line_numbers=True), title="[bold green]Script Python a Executer[/bold green]"))
-
-        if yes:
-            return True
-        return typer.confirm("Souhaitez-vous executer ce script sur vos fichiers ?", default=True)
-
     result = agent.process_request(
         user_prompt=prompt,
-        confirm_callback=confirm_cb,
+        confirm_callback=make_confirm_cb(auto=yes),
+        delete_callback=confirm_deletion,
     )
 
     if result.success:
@@ -125,6 +136,7 @@ def batch(
         pattern=pattern,
         prompt_template=prompt,
         auto_confirm=yes,
+        delete_callback=confirm_deletion,
     )
 
     success_count = sum(1 for _, r in results if r.success)
@@ -360,11 +372,11 @@ def chat(
                     console.print("[yellow]Usage : /inspect <nom_du_fichier>[/yellow]")
                 continue
 
-            def confirm_cb(exp: str, code: str) -> bool:
-                console.print(Panel(exp, title="Demarche"))
-                return typer.confirm("Executer ?", default=True)
-
-            res = agent.process_request(user_input, confirm_callback=confirm_cb)
+            res = agent.process_request(
+                user_input,
+                confirm_callback=make_confirm_cb(),
+                delete_callback=confirm_deletion,
+            )
             if res.success and res.created_files:
                 console.print("[bold green]Fichiers generes :[/bold green]")
                 for f in res.created_files:
